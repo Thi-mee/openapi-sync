@@ -71,7 +71,7 @@ const OpenapiSync = async (
   const config = require(path.join(rootUsingCwd, "openapi.sync.json"));
   const folderPath = path.join(config.folder || "", apiName);
 
-  const spec: IOpenApiSpec = lintResults.bundle.parsed;
+  const spec: IOpenApiSpec = lintResults.bundle.parsed as IOpenApiSpec;
   // auto update only on dev
   if (refetchInterval && !isNaN(refetchInterval) && refetchInterval > 0) {
     if (

@@ -3,9 +3,10 @@ import { variableNameChar } from "./regex";
 import * as yaml from "js-yaml";
 import lodash from "lodash";
 
-export const isJson = (value: any) => {
-  return ["object"].includes(typeof value) && !(value instanceof Blob);
+export const isJson = (value: any): value is object => {
+  return typeof value === "object" && value !== null && !(value instanceof Blob);
 };
+
 export const isYamlString = (fileContent: string) => {
   try {
     yaml.load(fileContent);
@@ -91,6 +92,100 @@ export const getEndpointDetails = (path: string, method: string) => {
   return { name, variables, pathParts };
 };
 
+const handleRef = (
+  apiDoc: IOpenApiSpec,
+  schema: IOpenApSchemaSpec,
+  options?: { noSharedImport?: boolean }
+): { type: string; componentName: string; overrideName: string } => {
+  let type = "";
+  let componentName = "";
+  let overrideName = "";
+
+  if (schema.$ref && schema.$ref.startsWith("#")) {
+    const pathToComponentParts = schema.$ref.split("/").slice(1);
+    const pathToComponent = pathToComponentParts.join(".");
+    const component = lodash.get(apiDoc, pathToComponent, null) as IOpenApSchemaSpec;
+
+    if (component) {
+      if ((component as any)?.name) {
+        overrideName = (component as any).name;
+      }
+      componentName = pathToComponentParts[pathToComponentParts.length - 1];
+      type = `${options?.noSharedImport ? "" : "Shared."}${getSharedComponentName(
+        componentName
+      )}`;
+    }
+  }
+  // TODO: Handle external $ref (URI)
+  return { type, componentName, overrideName };
+};
+
+const handleComposition = (
+  apiDoc: IOpenApiSpec,
+  schemas: IOpenApSchemaSpec[],
+  separator: "|" | "&",
+  options?: any
+): string => {
+  return `(${schemas
+    .map((v) => parseSchemaToType(apiDoc, v, "", false, options))
+    .join(separator)})`;
+};
+
+const handleProperties = (
+  apiDoc: IOpenApiSpec,
+  schema: IOpenApSchemaSpec,
+  options?: any
+): string => {
+  if (!schema.properties) {
+    return "{[k: string]: any}";
+  }
+  const objKeys = Object.keys(schema.properties);
+  const requiredKeys = schema.required || [];
+  let typeCnt = "";
+
+  objKeys.forEach((key) => {
+    typeCnt += parseSchemaToType(
+      apiDoc,
+      schema.properties?.[key] as IOpenApSchemaSpec,
+      key,
+      requiredKeys.includes(key),
+      options
+    );
+  });
+
+  return typeCnt.length > 0 ? `{\n${typeCnt}}` : "{[k: string]: any}";
+};
+
+const handleType = (
+  apiDoc: IOpenApiSpec,
+  schema: IOpenApSchemaSpec,
+  options?: any
+): string => {
+  if (Array.isArray(schema.type)) {
+    const types = schema.type
+      .filter((t) => t !== "null")
+      .map((t) => handleType(apiDoc, { ...schema, type: t }, options));
+    return `(${types.join(" | ")})`;
+  }
+
+  switch (schema.type) {
+    case "integer":
+    case "number":
+      return "number";
+    case "array":
+      return "any[]";
+    case "object":
+      if (schema.additionalProperties) {
+        return `{[k: string]: ${
+          parseSchemaToType(apiDoc, schema.additionalProperties, "", true, options) || "any"
+        }}`;
+      }
+      return "{[k: string]: any}";
+    default:
+      return schema.type || "string";
+  }
+};
+
 export const parseSchemaToType = (
   apiDoc: IOpenApiSpec,
   schema: IOpenApSchemaSpec,
@@ -100,142 +195,39 @@ export const parseSchemaToType = (
     noSharedImport?: boolean;
     useComponentName?: boolean;
   }
-) => {
-  let overrideName = "";
-  let componentName = "";
+): string => {
+  if (!schema) {
+    return name ? `\t"${name}"${isRequired ? "" : "?"}: string;\n` : "string";
+  }
+
   let type = "";
-  if (schema) {
-    if (schema.$ref) {
-      // console.log("Type schema 2");
-      if (schema.$ref[0] === "#") {
-        let pathToComponentParts = (schema.$ref || "").split("/");
-        pathToComponentParts.shift();
-        const pathToComponent = pathToComponentParts.join(".");
-        const component = lodash.get(
-          apiDoc,
-          pathToComponent,
-          null
-        ) as IOpenApSchemaSpec;
-        // console.log("Type schema 3", pathToComponentParts);
+  let componentName = "";
+  let overrideName = "";
 
-        if (component) {
-          if ((component as any)?.name) {
-            overrideName = (component as any).name;
-          }
-          componentName = pathToComponentParts[pathToComponentParts.length - 1];
-
-          // Reference component via import instead of parsing
-          type += `${
-            options?.noSharedImport ? "" : "Shared."
-          }${getSharedComponentName(componentName)}`;
-          // type += `${parseSchemaToType(apiDoc, component, "", isRequired)}`;
-        }
-      } else {
-        type += "";
-        //TODO $ref is a uri - use axios to fetch doc
-      }
-    } else if (schema.anyOf) {
-      type += `(${schema.anyOf
-        .map((v) => parseSchemaToType(apiDoc, v, "", isRequired, options))
-        .join("|")})`;
-    } else if (schema.oneOf) {
-      type += `(${schema.oneOf
-        .map((v) => parseSchemaToType(apiDoc, v, "", isRequired, options))
-        .join("|")})`;
-    } else if (schema.allOf) {
-      type += `(${schema.allOf
-        .map((v) => parseSchemaToType(apiDoc, v, "", isRequired, options))
-        .join("&")})`;
-    } else if (schema.items) {
-      type += `${parseSchemaToType(
-        apiDoc,
-        schema.items,
-        "",
-        false,
-        options
-      )}[]`;
-    } else if (schema.properties) {
-      //parse object key one at a time
-      const objKeys = Object.keys(schema.properties);
-      const requiredKeys = schema.required || [];
-      let typeCnt = "";
-      objKeys.forEach((key) => {
-        typeCnt += `${parseSchemaToType(
-          apiDoc,
-          schema.properties?.[key] as IOpenApSchemaSpec,
-          key,
-          requiredKeys.includes(key),
-          options
-        )}`;
-      });
-      if (typeCnt.length > 0) {
-        type += `{\n${typeCnt}}`;
-      } else {
-        type += "{[k: string]: any}";
-      }
-    } else if (schema.type) {
-      if (schema.enum && schema.enum.length > 0) {
-        if (schema.enum.length > 1) type += "(";
-        type += schema.enum
-          .map((v) => `"${v}"`)
-          .join("|")
-          .toString();
-        if (schema.enum.length > 1) type += ")";
-      } else if (
-        ["string", "integer", "number", "array", "boolean"].includes(
-          schema.type
-        )
-      ) {
-        if (["integer", "number"].includes(schema.type)) {
-          type += `number`;
-        } else if (schema.type === "array") {
-          //Since we would have already parsed the arrays keys above "schema.items" if it exists
-          type += "any[]";
-          /* if (schema.items) {
-            type += `${parseSchemaToType(
-              apiDoc,
-              schema.items,
-              "",
-              false,
-              options
-            )}[]`;
-          } else {
-            type += "any[]";
-          } */
-        } else {
-          type += schema.type;
-        }
-      } else if (schema.type === "object") {
-        //Since we would have already parsed the object keys above "schema.properties" if it exists
-        if (schema.additionalProperties) {
-          type += `{[k: string]: ${
-            parseSchemaToType(
-              apiDoc,
-              schema.additionalProperties,
-              "",
-              true,
-              options
-            ) || "any"
-          }}`;
-        } else {
-          type += "{[k: string]: any}";
-        }
-      }
-    }
-  } else {
-    //Default type to string if no schema provided
-    type = "string";
+  if (schema.$ref) {
+    const refResult = handleRef(apiDoc, schema, options);
+    type = refResult.type;
+    componentName = refResult.componentName;
+    overrideName = refResult.overrideName;
+  } else if (schema.anyOf) {
+    type = handleComposition(apiDoc, schema.anyOf, "|", options);
+  } else if (schema.oneOf) {
+    type = handleComposition(apiDoc, schema.oneOf, "|", options);
+  } else if (schema.allOf) {
+    type = handleComposition(apiDoc, schema.allOf, "&", options);
+  } else if (schema.items) {
+    type = `${parseSchemaToType(apiDoc, schema.items, "", false, options)}[]`;
+  } else if (schema.properties) {
+    type = handleProperties(apiDoc, schema, options);
+  } else if (schema.enum) {
+    type = `(${schema.enum.map((v) => `"${v}"`).join(" | ")})`;
+  } else if (schema.type) {
+    type = handleType(apiDoc, schema, options);
   }
 
-  let _name = overrideName || name;
-  if (options?.useComponentName && !_name) {
-    _name = componentName;
-  }
+  const finalName = overrideName || name || (options?.useComponentName ? componentName : "");
+  const typeName = finalName ? `\t"${finalName}"${isRequired ? "" : "?"}: ` : "";
+  const nullable = Array.isArray(schema.type) && schema.type.includes("null") ? " | null" : "";
 
-  let typeName = _name ? `\t"${_name}"${isRequired ? "" : "?"}: ` : "";
-
-  const nullable = schema?.nullable ? " | null" : "";
-  return type.length > 0
-    ? `${typeName}${type}${nullable}${_name ? ";\n" : ""}`
-    : "";
+  return type ? `${typeName}${type}${nullable}${finalName ? ";\n" : ""}` : "";
 };

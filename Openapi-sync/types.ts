@@ -1,8 +1,10 @@
 export type IOpenApiSpec = Record<"openapi", string> & Record<string, any>;
 
+type OpenApiSchemaType = "string" | "integer" | "number" | "array" | "object" | "boolean" | "null";
+
 export type IOpenApSchemaSpec = {
   nullable?: boolean;
-  type: "string" | "integer" | "number" | "array" | "object" | "boolean";
+  type?: OpenApiSchemaType | OpenApiSchemaType[];
   example?: any;
   enum?: string[];
   format?: string;
