@@ -200,6 +200,13 @@ export const parseSchemaToType = (
     return name ? `\t"${name}"${isRequired ? "" : "?"}: string;\n` : "string";
   }
 
+  // If the schema is a simple type (not an object with properties), treat it as a type alias.
+  if (name && (schema.type || schema.format) && !schema.properties) {
+    const type = handleType(apiDoc, schema, options);
+    const nullable = Array.isArray(schema.type) && schema.type.includes("null") ? " | null" : "";
+    return `export type IApi${name} = ${type}${nullable};\n`;
+  }
+
   let type = "";
   let componentName = "";
   let overrideName = "";
