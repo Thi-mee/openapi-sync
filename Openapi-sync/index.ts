@@ -4,9 +4,12 @@ import {
   getEndpointDetails,
   getSharedComponentName,
   isJson,
-  isYamlString,
+  // isYamlString,
   parseSchemaToType,
   yamlStringToJson,
+  // validateTypeContent,
+  cleanTypeContent,
+  // logValidationErrors,
 } from "./components/helpers";
 import {
   IConfigReplaceWord,
@@ -17,7 +20,7 @@ import {
   IOpenApiSpec,
   IOpenApSchemaSpec,
 } from "./types";
-import { isEqual } from "lodash";
+import { isEqual, get } from "lodash";
 import axios from "axios";
 import axiosRetry from "axios-retry";
 import { bundleFromString, createConfig } from "@redocly/openapi-core";
@@ -102,55 +105,92 @@ const OpenapiSync = async (
   let sharedTypesFileContent: Record<string, string> = {};
 
   if (spec.components) {
-    Object.keys(spec.components).forEach((key) => {
-      if (
-        [
-          "schemas",
-          "responses",
-          "parameters",
-          "examples",
-          "requestBodies",
-          "headers",
-          "links",
-          "callbacks",
-        ].includes(key)
-      ) {
-        // Create components (shared) types
-        const components: Record<string, IOpenApiMediaTypeSpec> =
-          spec.components[key];
-        const contentKeys = Object.keys(components);
-
-        // only need 1 schema so will us the first schema provided
-        contentKeys.forEach((contentKey) => {
-          /*  const schema = (() => {
-            switch (key) {
-              case "parameters":
-                return components[contentKey].schema;
-              default:
-                return components[contentKey];
+  Object.keys(spec.components).forEach((key) => {
+    if (
+      [
+        "schemas",
+        "responses",
+        "parameters",
+        "examples",
+        "requestBodies",
+        "headers",
+        "links",
+        "callbacks",
+      ].includes(key)
+    ) {
+      // Create components (shared) types
+      const components: Record<string, any> = spec.components[key];
+      const contentKeys = Object.keys(components);
+      
+      contentKeys.forEach((contentKey) => {
+        let typeCnt = "";
+        
+        if (key === "parameters") {
+          // Parameters have a different structure
+          const parameter = components[contentKey] as IOpenApiParameterSpec;
+          if (parameter.schema) {
+            typeCnt = parseSchemaToType(spec, parameter.schema, "", true, {
+              noSharedImport: true,
+              useComponentName: false,
+            });
+          } else {
+            // Fallback for parameters without schema
+            typeCnt = "string";
+          }
+        } else if (key === "requestBodies") {
+          // Handle request bodies properly
+          const requestBody = components[contentKey] as IOpenApiRequestBodySpec;
+          if (requestBody.$ref) {
+            // This is a reference, resolve it
+            const refParts = requestBody.$ref.split('/').slice(1);
+            const refComponent = get(spec, refParts.join('.'), null);
+            if (refComponent) {
+              typeCnt = parseSchemaToType(spec, refComponent, "", true, {
+                noSharedImport: true,
+                useComponentName: false,
+              });
             }
-          })() as IOpenApSchemaSpec; */
+          } else if (requestBody.content) {
+            // Handle content-based request body
+            const contentKeys = Object.keys(requestBody.content);
+            if (contentKeys[0] && requestBody.content[contentKeys[0]].schema) {
+              typeCnt = parseSchemaToType(
+                spec,
+                requestBody.content[contentKeys[0]].schema as IOpenApSchemaSpec,
+                "",
+                true,
+                {
+                  noSharedImport: true,
+                  useComponentName: false,
+                }
+              );
+            }
+          }
+        } else {
+          // Regular component handling
           const schema = (
             components[contentKey]?.schema
               ? components[contentKey].schema
               : components[contentKey]
           ) as IOpenApSchemaSpec;
-          const typeCnt = `${parseSchemaToType(spec, schema, "", true, {
+          
+          typeCnt = parseSchemaToType(spec, schema, "", true, {
             noSharedImport: true,
-            useComponentName: ["parameters"].includes(key),
-          })}`;
-
-          if (typeCnt) {
-            sharedTypesFileContent[key] =
-              (sharedTypesFileContent[key] ?? "") +
-              `export type ${getSharedComponentName(
-                contentKey
-              )} = ${typeCnt};\n`;
-          }
-        });
-      }
-    });
-  }
+            useComponentName: false,
+          });
+        }
+        
+        if (typeCnt && typeCnt.trim()) {
+          // Clean up the type content
+          const cleanTypeCnt = cleanTypeContent(typeCnt);
+          sharedTypesFileContent[key] =
+            (sharedTypesFileContent[key] ?? "") +
+            `export type ${getSharedComponentName(contentKey)} = ${cleanTypeCnt};\n`;
+        }
+      });
+    }
+  });
+}
 
   const getBodySchemaType = (requestBody: IOpenApiRequestBodySpec) => {
     let typeCnt = "";
@@ -257,7 +297,17 @@ const OpenapiSync = async (
         const requestBody: IOpenApiRequestBodySpec =
           endpointSpec[method]?.requestBody;
 
-        let typeCnt = getBodySchemaType(requestBody);
+        let typeCnt = "";
+  
+        // Check if requestBody has a $ref
+        if (requestBody.$ref) {
+          const refParts = requestBody.$ref.split('/').slice(1);
+          const componentName = refParts[refParts.length - 1];
+          typeCnt = `Shared.${getSharedComponentName(componentName)}`;
+        } else {
+          typeCnt = getBodySchemaType(requestBody);
+        }
+        
         if (typeCnt) {
           typesFileContent += `export type I${endpoint.name}DTO = ${typeCnt};\n`;
         }
@@ -284,6 +334,24 @@ const OpenapiSync = async (
   await fs.promises.writeFile(endpointsFilePath, endpointsFileContent);
 
   if (Object.values(sharedTypesFileContent).length > 0) {
+    const sharedContent = Object.values(sharedTypesFileContent).join("\n");
+    
+    // const validation = validateTypeContent(sharedContent);
+    
+    // if (!validation.isValid) {
+    //   logValidationErrors(validation.errors, 'shared.ts');
+      
+    //   // Write the invalid content to a debug file so you can inspect it
+    //   const debugFilePath = path.join(rootUsingCwd, folderPath, "types", "shared.debug.ts");
+    //   await fs.promises.mkdir(path.dirname(debugFilePath), { recursive: true });
+    //   await fs.promises.writeFile(debugFilePath, sharedContent);
+      
+    //   console.error(`\n🔍 Invalid content written to: ${debugFilePath}`);
+    //   console.error('Review this file to see exactly what was generated.');
+      
+    //   // return false; // Don't write the main file
+    // }
+
     // Create the necessary directories
     const sharedTypesFilePath = path.join(
       rootUsingCwd,
@@ -297,7 +365,7 @@ const OpenapiSync = async (
     // Create the file asynchronously
     await fs.promises.writeFile(
       sharedTypesFilePath,
-      Object.values(sharedTypesFileContent).join("\n")
+      sharedContent
     );
   }
 

@@ -46,6 +46,7 @@ export type IOpenApiRequestBodySpec = {
   description?: string;
   required?: boolean;
   content: Record<string, IOpenApiMediaTypeSpec>;
+  $ref: string;
 };
 
 export type IOpenApiResponseSpec = Record<string, IOpenApiRequestBodySpec>;
